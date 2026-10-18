@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PREFIX="${AGENTIC_ROOT_PREFIX:-}"
+if [[ "$PREFIX" != "/" ]]; then
+    PREFIX="${PREFIX%/}"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_GUIDANCE="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/guidance/user"
+
+if [[ -n "${AGENTIC_GUIDANCE_SRC:-}" ]]; then
+    SRC="$AGENTIC_GUIDANCE_SRC"
+elif [[ -d "${PREFIX}/opt/agentic/guidance/user" ]]; then
+    SRC="${PREFIX}/opt/agentic/guidance/user"
+elif [[ -d "$REPO_GUIDANCE" ]]; then
+    SRC="$REPO_GUIDANCE"
+else
+    SRC="${PREFIX}/opt/agentic/guidance/user"
+fi
+
+if [[ ! -d "$SRC" ]]; then
+    echo "missing source directory: $SRC"
+    exit 1
+fi
+
+CONFIG_FILE="${AGENTIC_CONFIG:-${PREFIX}/etc/agentic/agentic.toml}"
+INTERACTIVE_USER="${AGENTIC_INTERACTIVE_USER:-}"
+if [[ -z "$INTERACTIVE_USER" && -f "$CONFIG_FILE" ]]; then
+    INTERACTIVE_USER="$(sed -n 's/^[[:space:]]*interactive_user[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -n 1)"
+fi
+INTERACTIVE_USER="${INTERACTIVE_USER:-agent}"
+
+if [[ -n "${AGENTIC_GUIDANCE_DST:-}" ]]; then
+    DST="$AGENTIC_GUIDANCE_DST"
+else
+    USER_HOME="$(getent passwd "$INTERACTIVE_USER" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -z "$USER_HOME" ]]; then
+        USER_HOME="/home/${INTERACTIVE_USER}"
+    fi
+    if [[ -n "$PREFIX" && "$USER_HOME" == "$PREFIX"/* ]]; then
+        DST="${USER_HOME}/.omp/agent"
+    else
+        DST="${PREFIX}${USER_HOME}/.omp/agent"
+    fi
+fi
+
+mapfile -t REL_FILES < <(cd "$SRC" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+
+DRIFT=0
+for rel in "${REL_FILES[@]}"; do
+    if [[ ! -f "$DST/$rel" ]]; then
+        echo "missing: $rel"
+        DRIFT=1
+    elif ! cmp -s "$SRC/$rel" "$DST/$rel"; then
+        echo "modified: $rel"
+        DRIFT=1
+    fi
+done
+
+for sub in rules skills extensions agents; do
+    if [[ -d "$DST/$sub" ]]; then
+        while IFS= read -r rel; do
+            if [[ -n "$rel" && ! -f "$SRC/$rel" ]]; then
+                echo "extra: $rel"
+                DRIFT=1
+            fi
+        done < <(cd "$DST" && find "$sub" -type f | LC_ALL=C sort)
+    fi
+done
+
+exit "$DRIFT"

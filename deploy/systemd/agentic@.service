@@ -1,0 +1,19 @@
+# One supervised mission. The ledger is the state, so a restart (crash, reboot) resumes it.
+[Unit]
+Description=agentic mission %i
+After=network-online.target omp-auth-gateway.service
+Wants=network-online.target omp-auth-gateway.service
+OnFailure=agentic-failed@%i.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/agentic run %i
+# 0 = all criteria passed, 1 = finished but not complete: both are normal ends.
+SuccessExitStatus=1
+Restart=on-abnormal
+RestartSec=30
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

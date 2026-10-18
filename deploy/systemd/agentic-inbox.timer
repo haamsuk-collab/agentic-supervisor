@@ -1,0 +1,11 @@
+# Backup for agentic-inbox.path: handle the inbox every minute.
+[Unit]
+Description=agentic inbox processor, every minute
+
+[Timer]
+OnCalendar=minutely
+Persistent=true
+Unit=agentic-inbox.service
+
+[Install]
+WantedBy=timers.target

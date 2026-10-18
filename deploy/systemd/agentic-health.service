@@ -1,0 +1,8 @@
+# Started by agentic-health.timer: runs self-repairs and writes the daily health card to the outbox.
+[Unit]
+Description=agentic daily health check and self-repair
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agentic health
+UMask=0077

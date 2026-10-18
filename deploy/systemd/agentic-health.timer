@@ -1,0 +1,11 @@
+# Daily 08:00 KST job: run self-repairs and send the health card.
+[Unit]
+Description=agentic daily health check and self-repair timer
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Asia/Seoul
+Persistent=true
+Unit=agentic-health.service
+
+[Install]
+WantedBy=timers.target

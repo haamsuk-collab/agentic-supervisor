@@ -1,0 +1,8 @@
+# Handles the requests in the inbox as root. Started by agentic-inbox.path and agentic-inbox.timer.
+[Unit]
+Description=agentic inbox processor
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agentic inbox
+UMask=0077

@@ -1,0 +1,7 @@
+# Started by OnFailure= of agentic@<id>.service: tells the owner that the supervisor crashed.
+[Unit]
+Description=agentic failure notice for mission %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agentic notify-failure %i

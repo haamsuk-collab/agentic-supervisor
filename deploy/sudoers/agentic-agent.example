@@ -1,0 +1,4 @@
+# Optional sudoers policy for the interactive agent account (installed by `install.sh --agent-sudo`).
+# Install to /etc/sudoers.d/agentic-agent with mode 0440 (root:root) after checking with `visudo -cf`.
+# Never grant sudo rights to agwork, agplan, or agbot.
+agent ALL=(ALL) NOPASSWD: ALL

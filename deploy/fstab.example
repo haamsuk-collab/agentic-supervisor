@@ -1,0 +1,4 @@
+# Mount /proc with hidepid=2 so unprivileged accounts (agwork, agplan, agbot) cannot see
+# other users' processes, command lines, or environment variables.
+# Create the system group `procview` first: groupadd --system procview
+proc /proc proc defaults,hidepid=2,gid=procview 0 0

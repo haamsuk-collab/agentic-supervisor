@@ -1,0 +1,26 @@
+agentic supervisor
+Copyright (c) 2026 haamsuk-collab
+Licensed under the MIT License (see LICENSE).
+
+This repository includes or builds on the following third-party work.
+
+1. insane-search (guidance/user/skills/insane-search/)
+   Copyright (c) 2026 fivetaku
+   https://github.com/fivetaku/insane-search
+   MIT License. The original license is kept in guidance/user/skills/insane-search/LICENSE.
+
+The writing guidance (guidance/user/RULES.md, guidance/user/rules/korean-writing.md,
+guidance/user/rules/english-writing.md, guidance/user/skills/humanize/, TEMPLATE-RULES.md and the
+banned-phrase lists in agentic/i18n/) draws on these sources:
+
+2. im-not-ai, by epoko77-ai
+   https://github.com/epoko77-ai/im-not-ai
+   MIT License.
+
+3. sepia, by Nanako0129
+   https://github.com/Nanako0129/sepia
+   MIT License.
+
+4. humanizer, by blader
+   https://github.com/blader/humanizer
+   MIT License.

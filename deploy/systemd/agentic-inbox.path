@@ -1,0 +1,9 @@
+# Runs agentic-inbox.service when the bot puts a request into the inbox.
+[Unit]
+Description=agentic inbox watcher
+
+[Path]
+PathChanged=/var/spool/agentic/inbox
+
+[Install]
+WantedBy=multi-user.target

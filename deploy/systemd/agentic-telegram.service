@@ -1,0 +1,21 @@
+# The Telegram bot. It never runs as root and never touches mission state: it only uses the spool folders.
+[Unit]
+Description=agentic Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=agbot
+Group=agbot
+Restart=always
+RestartSec=10
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/spool/agentic /var/lib/agbot
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ExecStart=/usr/bin/python3.12 -I -c 'import sys; sys.path.insert(0, "/opt/agentic"); from agentic.telegram import main; sys.exit(main())'
+
+[Install]
+WantedBy=multi-user.target

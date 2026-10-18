@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PREFIX="${AGENTIC_ROOT_PREFIX:-}"
+if [[ "$PREFIX" != "/" ]]; then
+    PREFIX="${PREFIX%/}"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_GUIDANCE="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/guidance/user"
+
+if [[ -n "${AGENTIC_GUIDANCE_SRC:-}" ]]; then
+    SRC="$AGENTIC_GUIDANCE_SRC"
+elif [[ -d "${PREFIX}/opt/agentic/guidance/user" ]]; then
+    SRC="${PREFIX}/opt/agentic/guidance/user"
+elif [[ -d "$REPO_GUIDANCE" ]]; then
+    SRC="$REPO_GUIDANCE"
+else
+    SRC="${PREFIX}/opt/agentic/guidance/user"
+fi
+
+if [[ ! -d "$SRC" ]]; then
+    echo "agentic-guidance-sync: source directory not found: $SRC" >&2
+    exit 1
+fi
+
+CONFIG_FILE="${AGENTIC_CONFIG:-${PREFIX}/etc/agentic/agentic.toml}"
+INTERACTIVE_USER="${AGENTIC_INTERACTIVE_USER:-}"
+if [[ -z "$INTERACTIVE_USER" && -f "$CONFIG_FILE" ]]; then
+    INTERACTIVE_USER="$(sed -n 's/^[[:space:]]*interactive_user[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -n 1)"
+fi
+INTERACTIVE_USER="${INTERACTIVE_USER:-agent}"
+
+if [[ -n "${AGENTIC_GUIDANCE_DST:-}" ]]; then
+    DST="$AGENTIC_GUIDANCE_DST"
+else
+    USER_HOME="$(getent passwd "$INTERACTIVE_USER" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -z "$USER_HOME" ]]; then
+        USER_HOME="/home/${INTERACTIVE_USER}"
+    fi
+    if [[ -n "$PREFIX" && "$USER_HOME" == "$PREFIX"/* ]]; then
+        DST="${USER_HOME}/.omp/agent"
+    else
+        DST="${PREFIX}${USER_HOME}/.omp/agent"
+    fi
+fi
+
+mkdir -p "$DST"
+
+mapfile -t REL_FILES < <(cd "$SRC" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+if [[ "${#REL_FILES[@]}" -eq 0 ]]; then
+    echo "agentic-guidance-sync: no guidance files found in $SRC" >&2
+    exit 1
+fi
+
+DST_FILES=()
+for rel in "${REL_FILES[@]}"; do
+    DST_FILES+=("$DST/$rel")
+done
+
+# Unlock target files before overwriting.
+chattr -i "${DST_FILES[@]}" 2>/dev/null || true
+
+# Remove any extra files inside managed guidance subdirectories.
+for sub in rules skills extensions agents; do
+    if [[ -d "$DST/$sub" ]]; then
+        while IFS= read -r -d '' existing; do
+            rel="${existing#"$DST/"}"
+            if [[ ! -f "$SRC/$rel" ]]; then
+                chattr -i "$existing" 2>/dev/null || true
+                rm -f "$existing"
+            fi
+        done < <(find "$DST/$sub" -type f -print0)
+    fi
+done
+
+# Copy every file from source into destination.
+for rel in "${REL_FILES[@]}"; do
+    mkdir -p "$(dirname "$DST/$rel")"
+    cp -f "$SRC/$rel" "$DST/$rel"
+    chmod 0644 "$DST/$rel"
+done
+
+# Lock all synced guidance files with chattr +i.
+chattr +i "${DST_FILES[@]}"

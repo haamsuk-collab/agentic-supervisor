@@ -1,0 +1,9 @@
+# Started by agentic-daily.timer: runs the daily honesty canary, then backs up supervisor state.
+[Unit]
+Description=agentic daily honesty canary and backup
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/local/sbin/agentic honesty-canary
+ExecStart=/usr/local/sbin/agentic backup
+UMask=0077

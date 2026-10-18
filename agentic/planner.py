@@ -23,7 +23,7 @@ from agentic.i18n import ko as ko_texts
 from agentic.i18n import t
 from agentic.ledger import LedgerError, parse_ts, utcnow
 from agentic.mission import (APPROACH_MAX_CHARS, ASSUMPTION_MAX_CHARS, ASSUMPTIONS_MAX_ITEMS,
-                             DEFAULT_LIMITS, Check, Mission, MissionError, parse_check, parse_mission)
+                             DEFAULT_LIMITS, Check, Mission, MissionError, check_dict, parse_check, parse_mission)
 MAX_RERUNS = 2  # re-runs of `checks` for vetoed criteria; the criterion is dropped after the last one
 GOAL_MAX_CHARS = 2000
 LIST_ITEM_MAX_CHARS = 500
@@ -637,10 +637,6 @@ current file only when it has a bug, and then name that bug under `reasons`; the
 STRENGTHEN_SCHEMA = CHECKS_SCHEMA + """
 Optional: "reasons": {"<criterion id>": "<the bug in the current check, at most 500 characters>"} next to "checks",
 only for checks that change or drop a file of the current check."""
-
-
-def check_dict(check: Check) -> dict:
-    return {"argv": list(check.argv), "timeout": check.timeout, "network": check.network, "files": dict(check.files)}
 
 
 def strengthen_prompt(request: str, brief: dict, design: dict, ids: list[str], current: dict[str, dict],

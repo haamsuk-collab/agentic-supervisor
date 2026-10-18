@@ -15,7 +15,7 @@ from pathlib import Path
 
 from agentic import mutation, planner
 from agentic.config import Config
-from agentic.mission import Check, Mission
+from agentic.mission import Check, Mission, check_dict
 from agentic.mutation import Mutant
 
 MISSING = "criterion_without_check"
@@ -27,7 +27,7 @@ DEFAULT_REASON = "stronger check against the surviving mutants; every file of th
 
 def check_sha256(check: Check) -> str:
     """sha256 of the canonical JSON of a check (argv, timeout, network, files)."""
-    text = json.dumps(planner.check_dict(check), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(check_dict(check), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -49,8 +49,8 @@ def violations(cfg: Config, old: Mission, new: Mission, reasons: dict[str, str],
         before, after = old.criterion(cid).check.files, new.criterion(cid).check.files
         if any(after.get(rel) != content for rel, content in before.items()) and not reasons.get(cid):
             found.append({"criterion": cid, "rule": FILES})
-    empty = planner.empty_folder_problems(cfg, new.id, {cid: planner.check_dict(new.criterion(cid).check)
-                                                        for cid in ids}, ids)
+    empty = planner.empty_folder_problems(cfg, new.id, {cid: check_dict(new.criterion(cid).check) for cid in ids},
+                                          ids)
     found += [{"criterion": cid, "rule": EMPTY} for cid in ids if empty[cid]]
     for mutant in killed_mutants:
         where = {"file": mutant.file, "line": mutant.line, "operator": mutant.operator}

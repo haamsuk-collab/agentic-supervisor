@@ -11,13 +11,39 @@ import errno
 import json
 import os
 import pwd
+import re
 import secrets
 import stat
+import threading
+import time
 from pathlib import Path
 
 from agentic.config import DOC_SUFFIX, DOCUMENT_MAX_BYTES
 
 TMP_SUFFIX = ".tmp"
+SEQ_DIGITS = 20
+SEQ_NAME = re.compile(r"^(\d{%d})-" % SEQ_DIGITS)
+
+_seq_lock = threading.Lock()
+_last_seq = 0
+
+
+def new_name() -> str:
+    """A fresh item name `<20-digit sequence>-<32 hex>`. The sequence is time.time_ns(), raised past the last
+    one this process handed out, so names made by one process sort in the order they were made even within one
+    nanosecond or after a clock step back."""
+    global _last_seq
+    with _seq_lock:
+        _last_seq = max(time.time_ns(), _last_seq + 1)
+        seq = _last_seq
+    return f"{seq:0{SEQ_DIGITS}d}-{secrets.token_hex(16)}"
+
+
+def order_key(name: str, mtime_ns: int) -> tuple[int, str]:
+    """Sort key of an item: the sequence in its name, or its modification time for a name given by the caller
+    (`<mission>-<seq>` notices); the name breaks ties."""
+    match = SEQ_NAME.match(name)
+    return (int(match.group(1)) if match else mtime_ns, name)
 
 
 class SpoolError(ValueError):
@@ -59,12 +85,12 @@ def is_document_name(name: str) -> bool:
 
 def write_item(directory: str | Path, payload: dict, name: str | None = None,
                owner: tuple[int, int] | None = None) -> str:
-    """Write `payload` as the file `name` (default: secrets.token_hex(16)) and return the name.
+    """Write `payload` as the file `name` (default: new_name()) and return the name.
 
     FileNotFoundError: the folder does not exist. FileExistsError: `name` or `name.tmp` already exists
     (whatever it is, a planted symlink included). `owner`: fchown the file to (uid, gid) before it is renamed.
     """
-    name = name or secrets.token_hex(16)
+    name = name or new_name()
     if not valid_name(name) or name.endswith(DOC_SUFFIX):
         raise ValueError(f"invalid spool file name {name!r}")
     _write_file(directory, name, json.dumps(payload, ensure_ascii=False).encode("utf-8"), owner)
@@ -73,12 +99,12 @@ def write_item(directory: str | Path, payload: dict, name: str | None = None,
 
 def write_document(directory: str | Path, data: bytes, name: str | None = None,
                    owner: tuple[int, int] | None = None) -> str:
-    """Write `data` as the document file `<name>.doc` (default name: secrets.token_hex(16)) exactly like an item
+    """Write `data` as the document file `<name>.doc` (default name: new_name()) exactly like an item
     and return the file name. DocumentTooLarge (nothing written) over DOCUMENT_MAX_BYTES; FileNotFoundError and
     FileExistsError as for write_item."""
     if len(data) > DOCUMENT_MAX_BYTES:
         raise DocumentTooLarge(len(data))
-    name = (name or secrets.token_hex(16)) + DOC_SUFFIX
+    name = (name or new_name()) + DOC_SUFFIX
     if not is_document_name(name):
         raise ValueError(f"invalid spool file name {name!r}")
     _write_file(directory, name, data, owner)
@@ -114,8 +140,8 @@ def _write_file(directory: str | Path, name: str, data: bytes, owner: tuple[int,
 
 
 def list_names(dfd: int) -> list[str]:
-    """Names of finished items, oldest first (modification time, then name). `*.tmp`, `*.doc` (documents, read
-    through their item) and dot files are skipped."""
+    """Names of finished items, oldest first (order_key: the sequence in the name, else the modification time;
+    then the name). `*.tmp`, `*.doc` (documents, read through their item) and dot files are skipped."""
     found = []
     for name in os.listdir(dfd):
         if not valid_name(name) or name.endswith(DOC_SUFFIX):
@@ -124,7 +150,7 @@ def list_names(dfd: int) -> list[str]:
             info = os.stat(name, dir_fd=dfd, follow_symlinks=False)
         except FileNotFoundError:
             continue
-        found.append((info.st_mtime_ns, name))
+        found.append(order_key(name, info.st_mtime_ns))
     return [name for _, name in sorted(found)]
 
 

@@ -308,7 +308,7 @@ class HiddenChecksTests(PlannedTestCase):
                 self.assertNotIn(secret, call["prompt"])
         started = next(r for r in self.records() if r["type"] == "mission_started")
         self.assertEqual(set(started["data"]), {"id", "goal", "criteria", "limits", "ladder", "request",
-                                                "approach", "assumptions"})
+                                                "approach", "assumptions", "contract_sha256", "check_sha256"})
         for secret in secrets:
             self.assertNotIn(secret, json.dumps(started["data"]))
             self.assertNotIn(secret, self.report_text())

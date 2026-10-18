@@ -55,7 +55,7 @@ class InboxCase(SupervisorTestCase):
         """Outbox items, oldest first. A card item is shown as {"text": <what the owner reads>, "reply_to"?} after
         its HTML was checked; a document item keeps its fields plus "content" (the document's bytes)."""
         files = sorted((p for p in self.cfg.outbox.iterdir() if not p.name.endswith(".doc")),
-                       key=lambda p: p.stat().st_mtime_ns)
+                       key=lambda p: spool.order_key(p.name, p.stat().st_mtime_ns))
         found = []
         for path in files:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -258,7 +258,7 @@ class CommandTests(InboxCase):
         self.process()
         (path,) = self.cfg.outbox.iterdir()
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        self.assertRegex(path.name, r"^[0-9a-f]{32}$")
+        self.assertRegex(path.name, r"^\d{20}-[0-9a-f]{32}$")
         self.assertNotIn("reply_to", json.loads(path.read_text(encoding="utf-8")))
 
     def test_a_missing_inbox_is_quietly_fine(self):

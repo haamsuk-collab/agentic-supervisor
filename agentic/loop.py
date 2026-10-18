@@ -13,10 +13,12 @@ from agentic import (admin, canary, checks, commands, config, faults, llm, mutat
                      report, review, worker)
 from agentic.config import OUTAGE_ALERT_SECONDS, REVIEW_OUTAGE_MAX_SECONDS, Config
 from agentic.i18n import t
-from agentic.ledger import Ledger, LedgerError, parse_ts, utcnow
-from agentic.mission import Mission, load_mission, parse_mission
+from agentic.ledger import Ledger, LedgerError, manifest_digest, parse_ts, utcnow
+from agentic.mission import Mission, contract_sha256, load_mission, parse_mission
 
 FAILING, PASSING, INVALID, GAVE_UP = "failing", "passing", "invalid_check", "gave_up"
+CHECKS_UNSTABLE = "checks_unstable"  # notice kind: the checks of one iteration saw different snapshots
+UNSTABLE_ATTEMPTS = 2  # the first mismatch reruns the checks; the second stops the mission as stopped_unstable
 
 
 class MissionBusy(RuntimeError):
@@ -93,6 +95,17 @@ class LoopState:
         self.hygiene: list[str] = []  # worker files the latest `hygiene` record lists (removed from check snapshots)
         self.updates_recorded: set[str] = set()  # criteria with a checks_update record (SPEC-H section 2)
         self.update_rejected = False  # the ratchet rejected the strengthened checks (checks_update_rejected)
+        # Evidence binding: what each check ran against.
+        self.contract: str | None = None  # contract_sha256 in force (None: an old, unbound ledger)
+        self.contract_pending: str | None = None  # a strengthening's new contract, before checks_strengthened
+        self.iter_checks: dict[str, dict] = {}  # criterion -> {"seq", "hash", "passed"} of its latest check_result
+        self.iter_snapshot: str | None = None  # the snapshot_sha256 every check_result of the iteration shares
+        self.unstable_attempts = 0  # checks_unstable notices since the latest recorded check_result
+
+    def accepted_contracts(self) -> set[str]:
+        """Contract hashes a resumed run may find in the mission file. While a strengthening is half recorded, the
+        file may still hold the contract before it (the new file is written after the checks_update records)."""
+        return {h for h in (self.contract, self.contract_pending) if h is not None}
 
     def apply(self, record: dict) -> None:
         getattr(self, "_on_" + record["type"])(record)
@@ -114,6 +127,7 @@ class LoopState:
         self.limits = data["limits"]
         self.ladder = data["ladder"]
         self.approach = data.get("approach")
+        self.contract = data.get("contract_sha256")  # old ledgers have no such key
 
     def _on_plan_started(self, record: dict) -> None:
         self.plan.apply(record)
@@ -138,6 +152,7 @@ class LoopState:
         self.iteration = data["iteration"]
         self.active = list(data["active"])
         self.results = {}
+        self.iter_checks, self.iter_snapshot, self.unstable_attempts = {}, None, 0
         self.note = data["note"]
         self.outage_started, self.outage_attempts, self.outage_waits = None, 0, 0
         self.outage_alert_seq, self.next_model, self.wait_until = None, None, None
@@ -166,10 +181,17 @@ class LoopState:
 
     def _on_check_result(self, record: dict) -> None:
         data = record["data"]
-        self.status[data["criterion"]] = PASSING if data["passed"] else FAILING
-        self.results[data["criterion"]] = data["passed"]
+        cid = data["criterion"]
+        self.iter_checks[cid] = {"seq": record["seq"], "hash": record["hash"], "passed": data["passed"]}
+        if self.iter_snapshot is None:
+            self.iter_snapshot = data.get("snapshot_sha256")  # old ledgers have no such key
+        self.unstable_attempts = 0
+        self.status[cid] = PASSING if data["passed"] else FAILING
         if not data["passed"]:
-            self.canary_failed.discard(data["criterion"])  # failing for its own reason now
+            self.canary_failed.discard(cid)  # failing for its own reason now
+        if data.get("confirm"):  # a pass without a check of this iteration, confirmed before finishing
+            return
+        self.results[cid] = data["passed"]
         if self.missing_checks():
             return
         if self.rechecking:  # strengthened checks on work already judged: statuses change, no new iteration result
@@ -224,18 +246,23 @@ class LoopState:
     def _on_checks_strengthened(self, record: dict) -> None:
         self.strengthened, self.pending = True, None
         self.strengthen_ok = record["data"]["ok"]
+        if self.strengthen_ok and record["data"].get("contract_sha256"):
+            self.contract = record["data"]["contract_sha256"]
+        self.contract_pending = None
         if self.strengthen_ok:  # run the new checks on the current work, then the canary and the score again
             self.active, self.results, self.rechecking = self.remaining(), {}, True
             self.canary_iteration = None
 
     def _on_checks_update(self, record: dict) -> None:
         self.updates_recorded.add(record["data"]["criterion"])
+        self.contract_pending = record["data"].get("new_contract_sha256")
 
     def _on_checks_update_rejected(self, record: dict) -> None:
         self.update_rejected = True
 
     def _on_notice(self, record: dict) -> None:
-        pass
+        if record["data"].get("kind") == CHECKS_UNSTABLE:
+            self.unstable_attempts = record["data"]["attempt"]
 
     def _on_hygiene(self, record: dict) -> None:
         self.hygiene = list(record["data"]["files"])
@@ -284,6 +311,7 @@ class Runner:
         self.cfg, self.mission, self.state, self.clock, self.sleep = cfg, mission, state, clock, sleep
         self.emit = emit  # append to the ledger, apply to `state`, notify
         self.workdir = cfg.workdir(mission.id)
+        self.last_manifest: tuple[str, dict[str, str]] | None = None  # (digest, manifest) of the latest batch
 
     def check(self, iteration: int, criterion_id: str) -> checks.CheckResult:
         return checks.run_check(self.cfg, self.mission.id, iteration, criterion_id,
@@ -310,11 +338,44 @@ class Runner:
         else:
             self.emit("baseline", {"results": results, "invalid": [], "inherited_pass": passed, "manifest": {}})
 
+    def run_batch(self, iteration: int, cids: list[str]) -> dict[str, dict] | None:
+        """Run the checks of `cids` and return their check_result data, bound to the snapshot, the check and the
+        contract they ran on. Every check of one iteration must see the same snapshot; when they do not, a
+        `checks_unstable` notice is recorded and None returned: the first time the checks run again, the second
+        time the mission stops as stopped_unstable."""
+        s = self.state
+        outcomes = {cid: self.check(iteration, cid) for cid in cids}
+        snapshots = {cid: o.snapshot_sha256 for cid, o in outcomes.items()}
+        if len(set(snapshots.values()) | ({s.iter_snapshot} if s.iter_snapshot else set())) > 1:
+            attempt = s.unstable_attempts + 1
+            self.emit("notice", {"kind": CHECKS_UNSTABLE, "iteration": iteration, "attempt": attempt,
+                                 "recorded_snapshot_sha256": s.iter_snapshot, "snapshots": snapshots,
+                                 "text": t("loop.checks_unstable_notice", attempt=attempt, limit=UNSTABLE_ATTEMPTS)})
+            if attempt >= UNSTABLE_ATTEMPTS:
+                self.finish("stopped_unstable")
+            return None
+        for o in outcomes.values():
+            self.last_manifest = (o.snapshot_sha256, o.manifest)
+        contract = contract_sha256(self.mission)
+        return {cid: {**o.to_data(), "check_sha256": ratchet.check_sha256(self.mission.criterion(cid).check),
+                      "contract_sha256": contract} for cid, o in outcomes.items()}
+
     def finish_missing_checks(self) -> None:
         self.record_hygiene()
-        for cid in self.state.missing_checks():
-            self.emit("check_result", {"iteration": self.state.iteration, "criterion": cid,
-                                       **self.check(self.state.iteration, cid).to_data()})
+        batch = self.run_batch(self.state.iteration, self.state.missing_checks())
+        for cid, data in (batch or {}).items():
+            self.emit("check_result", {"iteration": self.state.iteration, "criterion": cid, **data})
+
+    def unconfirmed_passes(self) -> list[str]:
+        """Passing criteria without a passing check_result in the current iteration (a follow-up's inherited passes
+        at iteration 0): a mission never finishes with a pass it cannot prove."""
+        return [cid for cid in self.passing() if not self.state.iter_checks.get(cid, {}).get("passed")]
+
+    def confirm_passes(self, cids: list[str]) -> None:
+        self.record_hygiene()
+        batch = self.run_batch(self.state.iteration, cids)
+        for cid, data in (batch or {}).items():
+            self.emit("check_result", {"iteration": self.state.iteration, "criterion": cid, **data, "confirm": True})
 
     def resolve_pending(self) -> None:
         s = self.state
@@ -386,17 +447,19 @@ class Runner:
             self.emit("checks_strengthened", {"iteration": s.iteration, "ok": False, "replaced": [],
                                               "kept": [c.id for c in new.criteria], "error": "ratchet"})
             return
+        old_contract, new_contract = contract_sha256(self.mission), contract_sha256(new)
         for cid in changed:
             if cid not in s.updates_recorded:
                 self.emit("checks_update", {
                     "iteration": s.iteration, "criterion": cid,
                     "old_sha256": ratchet.check_sha256(self.mission.criterion(cid).check),
                     "new_sha256": ratchet.check_sha256(new.criterion(cid).check),
+                    "old_contract_sha256": old_contract, "new_contract_sha256": new_contract,
                     "reason": result.reasons.get(cid, ratchet.DEFAULT_REASON)})
         planner.write_mission_file(self.cfg.mission_file(self.mission.id), result.raw)
         self.mission = new
         self.emit("checks_strengthened", {"iteration": s.iteration, "ok": True, "replaced": result.replaced,
-                                          "kept": result.kept})
+                                          "kept": result.kept, "contract_sha256": new_contract})
 
     def deadline(self) -> datetime:
         return self.state.started + timedelta(hours=self.state.limits["mission_hours"])
@@ -405,7 +468,26 @@ class Runner:
         return self.clock() >= self.deadline()
 
     def finish(self, status: str) -> None:
-        self.emit("mission_finished", {"status": status, "iterations": self.state.iteration})
+        """`proofs`: the passing check_result (seq, hash) of every passing criterion, all from the last iteration and
+        its one snapshot; `final_snapshot_sha256`: that snapshot; `final_manifest`: its manifest when known."""
+        s = self.state
+        proofs = [{"criterion": cid, "seq": c["seq"], "hash": c["hash"]}
+                  for cid in self.passing() if (c := s.iter_checks.get(cid)) and c["passed"]]
+        data = {"status": status, "iterations": s.iteration, "proofs": proofs, "final_snapshot_sha256": s.iter_snapshot}
+        manifest = self.final_manifest(s.iter_snapshot)
+        if manifest is not None:
+            data["final_manifest"] = manifest
+        self.emit("mission_finished", data)
+
+    def final_manifest(self, digest: str | None) -> dict[str, str] | None:
+        """The manifest behind `digest`: the latest batch's, or the worker folder's now when it still matches (a
+        resumed run). None when neither matches."""
+        if digest is None:
+            return None
+        if self.last_manifest is not None and self.last_manifest[0] == digest:
+            return self.last_manifest[1]
+        current = checks.tree_manifest(self.workdir)
+        return current if manifest_digest(current) == digest else None
 
     def iterate(self) -> None:
         s = self.state
@@ -471,6 +553,8 @@ class Runner:
         elif not s.failing() and self.review_due():
             if not outage.sleep_until(s.wait_until, self.clock, self.sleep):
                 self.run_review()
+        elif not s.failing() and (unconfirmed := self.unconfirmed_passes()):
+            self.confirm_passes(unconfirmed)
         elif not s.failing():
             self.finish("complete" if all(v == PASSING for v in s.status.values()) else "partial")
         elif self.time_is_up():
@@ -518,15 +602,22 @@ def _run_locked(mission_id: str, cfg: Config, clock: Callable[[], datetime], sle
         mission = _load(cfg, mission_id)
     if mission is None:  # planning failed: there is no mission to run
         if not state.finished:
-            emit("mission_finished", {"status": "plan_failed", "iterations": 0})
+            emit("mission_finished", {"status": "plan_failed", "iterations": 0, "proofs": [],
+                                      "final_snapshot_sha256": None})
         report.write_report(cfg, mission_id, ledger.read())
         return state.final_status
     admin.ensure_workdir(cfg, mission_id)
     runner = Runner(cfg, mission, state, clock, sleep, emit)
     if state.started is None:
-        runner.emit("mission_started", mission.public_view())
+        runner.emit("mission_started", {
+            **mission.public_view(), "contract_sha256": contract_sha256(mission),
+            "check_sha256": {c.id: ratchet.check_sha256(c.check) for c in mission.criteria}})
     elif [cid for cid, _ in state.criteria] != [c.id for c in mission.criteria]:
         raise LedgerError("the mission file's criteria differ from the ones recorded in the ledger")
+    elif (not state.finished and state.contract is not None
+          and (current := contract_sha256(mission)) not in state.accepted_contracts()):
+        raise LedgerError(f"the mission file changed since the ledger recorded it (contract sha256 {current}, "
+                          f"ledger {state.contract}); refusing to continue")
     if not state.baseline_done:
         runner.baseline()
     while not state.finished:

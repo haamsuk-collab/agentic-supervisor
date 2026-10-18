@@ -136,11 +136,14 @@ Every event in a mission is appended as a single JSON line to `<state>/missions/
 Stops mid-file edits, record deletion, record reordering, or silent corruption of mission history. With `chattr +a` set, even an accidental truncation or overwrite by a process running as `root` fails with `Operation not permitted` unless `chattr -a` is explicitly run first.
 
 ### How to See It Working
-- Run `/usr/bin/python3.12 -m agentic verify <mission-id>`. It prints `ok (<n> records)` and exits `0` when the chain is intact, warns on `stderr` (`warning: the ledger lacks the append-only flag (chattr +a)`) if `FS_APPEND_FL` is not set, and exits `2` naming the first broken record sequence number and reason if tampered.
+- Run `/usr/bin/python3.12 -m agentic verify <mission-id>`. It prints `ledger ok: <n> records` and exits `0` when the chain and the evidence binding hold, warns on `stderr` (`warning: the ledger lacks the append-only flag (chattr +a)`) if `FS_APPEND_FL` is not set, and exits `2` naming the first broken record sequence number and reason if tampered. For a finished mission it then compares the worker folder with the final check snapshot: `work folder: unchanged …`, `work folder: changed … (<n> paths): <up to 10 paths>` or `work folder: missing`. A ledger written before the binding existed prints `ledger is unbound: …`.
 - Run `lsattr /var/lib/agentic/missions/<id>/ledger.jsonl` as `root` to see the `-----a--------e-----` attribute.
 
 ### Its Limits
 A hash chain without an external anchor cannot detect a pure tail truncation (deleting the last $k$ complete lines) if the attacker first removes `chattr +a` as `root`. Daily backups (`agentic backup` to `/var/backups/agentic`) and Telegram notifications (`<id>-<seq>`) provide external snapshots of earlier sequence numbers.
+
+### Evidence Bound to What Was Checked
+`mission_started` records `contract_sha256`, the SHA-256 of the canonical JSON of the validated mission (checks included), and `check_sha256` per criterion; a resumed run refuses to continue when the mission file's contract hash is not the one in force (a strengthening records the old and new contract in `checks_update` and the new one in `checks_strengthened`). Every `check_result` records `snapshot_sha256` (the digest of the snapshot's file manifest, taken before the check files are written), `check_sha256`, `contract_sha256`, and the SHA-256 and byte count of the full stdout and stderr. All checks of one iteration must share one snapshot; otherwise they run once more, and a second mismatch stops the mission as `stopped_unstable`. `mission_finished` lists `proofs` (seq and hash of the passing `check_result` of each passing criterion, all from the last iteration and one snapshot) and `final_snapshot_sha256`; `Ledger.verify()` re-checks every proof (criterion, pass, last iteration, latest result, snapshot, check and contract hash, and a proof for every criterion of a `complete` mission). Reports count a finished criterion as achieved only through its proof. Old ledgers without these fields still verify and are labelled unbound; their passes are shown as `⚠️`, never `✅`.
 
 ---
 

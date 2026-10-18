@@ -1,5 +1,6 @@
 """Load and validate mission files."""
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -70,6 +71,23 @@ class Mission:
         if self.parent is not None:
             view["parent"] = self.parent
         return view
+
+    def contract(self) -> dict:
+        """The whole validated mission (defaults applied, checks included): what the supervisor checks against.
+        Never written to the ledger; only its sha256 is."""
+        view = self.public_view()
+        view["criteria"] = [{"id": c.id, "text": c.text, "check": check_dict(c.check)} for c in self.criteria]
+        return view
+
+
+def check_dict(check: Check) -> dict:
+    return {"argv": list(check.argv), "timeout": check.timeout, "network": check.network, "files": dict(check.files)}
+
+
+def contract_sha256(mission: Mission) -> str:
+    """sha256 of the canonical JSON (sorted keys, no spaces, UTF-8) of `mission.contract()`."""
+    text = json.dumps(mission.contract(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _object(value: object, where: str, required: set[str], optional: set[str]) -> dict:

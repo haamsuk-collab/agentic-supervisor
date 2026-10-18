@@ -252,7 +252,7 @@ class InboxNotifyAdminHealthCliEnglishTests(SupervisorTestCase, EnglishAssertion
     def _drain_outbox_texts_and_docs(self) -> tuple[list[str], list[tuple[str, str]]]:
         files = sorted(
             (p for p in self.cfg.outbox.iterdir() if not p.name.endswith(".doc")),
-            key=lambda p: p.stat().st_mtime_ns,
+            key=lambda p: spool.order_key(p.name, p.stat().st_mtime_ns),
         )
         texts: list[str] = []
         docs: list[tuple[str, str]] = []
@@ -452,10 +452,11 @@ class InboxNotifyAdminHealthCliEnglishTests(SupervisorTestCase, EnglishAssertion
                                             "c2": {"passed": False, "exit_code": 1}}, "invalid": []})
         led.append("iteration_worker", {"iteration": 1, "step": 0, "model": "anthropic/claude-sonnet-5-5",
                                         "thinking": "high", "active": ["c1", "c2"], "note": "done"})
-        led.append("check_result", {"iteration": 1, "criterion": "c1", "passed": True, "exit_code": 0})
+        r1 = led.append("check_result", {"iteration": 1, "criterion": "c1", "passed": True, "exit_code": 0})
         led.append("check_result", {"iteration": 1, "criterion": "c2", "passed": False, "exit_code": 1})
         led.append("gave_up", {"iteration": 1, "criteria": ["c2"], "attempts": 1})
-        led.append("mission_finished", {"status": "partial", "iterations": 1})
+        led.append("mission_finished", {"status": "partial", "iterations": 1, "final_snapshot_sha256": None,
+                                        "proofs": [{"criterion": "c1", "seq": r1["seq"], "hash": r1["hash"]}]})
         daily.backup(now=NOW - timedelta(minutes=10), dest=backup_dir, sources=(meminfo,),
                      keep=30, status_file=self.cfg.state / daily.BACKUP_STATUS_FILE)
 

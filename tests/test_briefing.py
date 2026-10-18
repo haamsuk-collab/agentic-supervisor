@@ -47,7 +47,16 @@ class Ledger:
         return self
 
     def finish(self, status: str) -> "Ledger":
-        return self.add("mission_finished", {"status": status, "iterations": self.iteration})
+        """mission_finished as the loop writes it: a proof for each criterion whose latest check_result of the last
+        iteration passed (synthetic records carry no hashes)."""
+        latest: dict[str, dict] = {}
+        for rec in self.records:
+            if rec["type"] == "check_result" and rec["data"]["iteration"] == self.iteration:
+                latest[rec["data"]["criterion"]] = rec
+        proofs = [{"criterion": cid, "seq": rec["seq"], "hash": ""}
+                  for cid, rec in latest.items() if rec["data"]["passed"]]
+        return self.add("mission_finished", {"status": status, "iterations": self.iteration, "proofs": proofs,
+                                             "final_snapshot_sha256": "0" * 64})
 
     def build(self, decisions=(), request=None, view=None) -> briefing.Briefing:
         return briefing.build(self.records, view or self.view, list(decisions), request)

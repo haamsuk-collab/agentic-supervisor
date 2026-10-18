@@ -1,9 +1,11 @@
 """Build the worker prompt from the ledger and run one worker iteration."""
 
+import contextlib
 import hashlib
 import math
 import os
 import pwd
+import secrets
 import shutil
 import tempfile
 import time
@@ -199,12 +201,81 @@ def _copy_secret_file(src: Path, dst: Path, owner: tuple[int, int] | None) -> No
         os.close(in_fd)
 
 
-def prepare_agent_dir(cfg: Config, agent_src: str | Path | None = None) -> Path:
-    """Create a mode-0700 throw-away omp agent directory and copy models.yml and config.yml into it."""
+AGENT_DIR_PREFIX = ".omp-agent-"
+AGENT_DIRS_REGISTRY = "agent-dirs"  # under cfg.state: one marker per live throw-away agent folder
+
+
+def _registry(cfg: Config) -> Path:
+    return cfg.state / AGENT_DIRS_REGISTRY
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def live_agent_dirs(cfg: Config) -> set[str]:
+    """Absolute paths of the throw-away agent folders that supervisor processes created and still use (any mission).
+    A marker whose process is gone is stale and removed. The registry lives in the supervisor's state folder, which
+    a worker cannot write, so a worker cannot hide a folder of its own by naming it like an agent folder."""
+    found: set[str] = set()
+    try:
+        entries = list(os.scandir(_registry(cfg)))
+    except OSError:
+        return found
+    for entry in entries:
+        try:
+            pid_text, _, path = Path(entry.path).read_text(encoding="utf-8").partition("\n")
+            pid = int(pid_text)
+        except (OSError, ValueError):
+            continue
+        if _pid_alive(pid):
+            found.add(os.path.abspath(path))
+        else:
+            with contextlib.suppress(OSError):
+                os.unlink(entry.path)
+    return found
+
+
+def _create_registered_dir(cfg: Config, parent: Path | None, prefix: str) -> tuple[Path, Path]:
+    """Register a fresh agent folder name, then create the folder (0700): another mission's leftover scan sees the
+    marker before it can see the folder. Returns (folder, marker)."""
+    registry = _registry(cfg)
+    registry.mkdir(parents=True, exist_ok=True, mode=0o700)
+    base = Path(parent) if parent is not None else Path(tempfile.gettempdir())
+    while True:
+        name = prefix + secrets.token_hex(8)
+        marker = registry / name
+        try:
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except FileExistsError:
+            continue
+        agent_dir = base / name
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{os.getpid()}\n{os.path.abspath(agent_dir)}")
+        try:
+            os.mkdir(agent_dir, 0o700)
+        except FileExistsError:
+            marker.unlink()
+            continue
+        except BaseException:
+            marker.unlink()
+            raise
+        return agent_dir, marker
+
+
+def prepare_agent_dir(cfg: Config, agent_src: str | Path | None = None) -> tuple[Path, Path]:
+    """Create a registered mode-0700 throw-away omp agent directory and copy models.yml and config.yml into it.
+    Returns (folder, registry marker); `release_agent_dir` removes both."""
     home = cfg.effective_worker_home()
     parent = home if home.is_dir() and os.access(home, os.W_OK) else None
-    prefix = ".omp-agent-" if parent is not None else "agentic-omp-"
-    agent_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    prefix = AGENT_DIR_PREFIX if parent is not None else "agentic-omp-"
+    agent_dir, marker = _create_registered_dir(cfg, parent, prefix)
     try:
         os.chmod(agent_dir, 0o700)
         # Only the production command runs as the worker account; a configured command runs as the caller.
@@ -215,9 +286,16 @@ def prepare_agent_dir(cfg: Config, agent_src: str | Path | None = None) -> Path:
         for name in config.WORKER_AGENT_FILES:
             _copy_secret_file(src / name, agent_dir / name, owner)
     except BaseException:
-        shutil.rmtree(agent_dir, ignore_errors=True)
+        release_agent_dir(agent_dir, marker)
         raise
-    return agent_dir
+    return agent_dir, marker
+
+
+def release_agent_dir(agent_dir: Path, marker: Path) -> None:
+    """Delete the folder first, then its marker, so the folder is never visible without a marker."""
+    shutil.rmtree(agent_dir, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        marker.unlink()
 
 
 def _file_digest(path: str) -> str:
@@ -237,20 +315,34 @@ def _file_digest(path: str) -> str:
 
 
 def home_snapshot(home: str | Path, workdir: str | Path, workspaces: str | Path,
-                  agent_dir: str | Path | None = None) -> dict[str, str]:
-    """Snapshot of `home` excluding `workdir`, `workspaces`, `agent_dir` and `config.WORKER_OMP_STATE`."""
+                  agent_dirs: set[str] | frozenset[str] = frozenset()) -> dict[str, str]:
+    """Snapshot of `home` excluding `workdir`, `workspaces`, the `agent_dirs` (absolute paths) and
+    `config.WORKER_OMP_STATE`."""
     home_path = Path(home)
     excluded = {
         os.path.abspath(str(workdir)),
         os.path.abspath(str(workspaces)),
         os.path.abspath(str(home_path / "missions")),
         *(os.path.abspath(p) for p in config.WORKER_OMP_STATE),
+        *agent_dirs,
     }
-    if agent_dir is not None:
-        excluded.add(os.path.abspath(str(agent_dir)))
     allowed_rel = frozenset(f".omp/{rel}" for rel in config._OMP_STATE_REL)
     found: dict[str, str] = {}
     _walk_home(os.path.abspath(str(home_path)), "", excluded, allowed_rel, found)
+    return found
+
+
+def _home_snapshot(cfg: Config, home: Path, workdir: str | Path, own: Path) -> dict[str, str]:
+    """home_snapshot without the mission's own agent folder and every live agent folder of any mission. The registry
+    is read before and after the walk, so a folder another mission registers during the walk is dropped as well."""
+    live = live_agent_dirs(cfg) | {os.path.abspath(own)}
+    found = home_snapshot(home, workdir, cfg.workspaces, live)
+    root = os.path.abspath(home)
+    late = [os.path.relpath(p, root) for p in live_agent_dirs(cfg) - live
+            if os.path.commonpath([p, root]) == root and p != root]
+    if late:
+        found = {rel: sig for rel, sig in found.items()
+                 if not any(rel == top or rel.startswith(top + "/") for top in late)}
     return found
 
 
@@ -292,17 +384,18 @@ def run_worker(cfg: Config, model: str, thinking: str, minutes: float, prompt: s
                workdir: str | Path, *, agent_src: str | Path | None = None) -> WorkerResult:
     """Run the worker once: stdin is /dev/null, cwd is the worker folder, PI_CODING_AGENT_DIR is a fresh temp dir."""
     home = cfg.effective_worker_home()
-    agent_dir = prepare_agent_dir(cfg, agent_src)
+    agent_dir, marker = prepare_agent_dir(cfg, agent_src)
     try:
-        before_home = home_snapshot(home, workdir, cfg.workspaces, agent_dir)
+        before_home = _home_snapshot(cfg, home, workdir, agent_dir)
         argv = build_command(cfg, model, thinking, minutes, prompt, workdir, agent_dir=agent_dir)
         # The unit enforces RuntimeMaxSec itself; the client-side limit is only a backstop.
         outer = hard_timeout_seconds(minutes) + (10 if cfg.worker_cmd is None else 0)
         started = time.monotonic()
         proc = run_process(argv, workdir, outer, env=worker_env(cfg, agent_dir))
         duration = time.monotonic() - started
-    finally:
         shutil.rmtree(agent_dir, ignore_errors=True)
-    after_home = home_snapshot(home, workdir, cfg.workspaces, agent_dir)
+        after_home = _home_snapshot(cfg, home, workdir, agent_dir)
+    finally:
+        release_agent_dir(agent_dir, marker)
     return WorkerResult(proc.exit_code, proc.timed_out, proc.stdout, proc.stderr, duration,
                         classify_leftovers(before_home, after_home))

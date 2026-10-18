@@ -50,7 +50,7 @@ sudo agentic mission status <id>
 sudo agentic report <id>
 ```
 
-`agentic mission status <id>` prints the unit state, the last 5 ledger events, and the rendered report (`<state>/missions/<id>/report.md`). `agentic report <id>` regenerates `report.md` directly from the hash-chained ledger, and `agentic verify <id>` verifies the ledger's SHA-256 hash chain and checks for the `chattr +a` append-only inode flag.
+`agentic mission status <id>` prints the unit state, the last 5 ledger events, and the rendered report (`<state>/missions/<id>/report.md`). `agentic report <id>` regenerates `report.md` directly from the hash-chained ledger, and `agentic verify <id>` verifies the ledger's SHA-256 hash chain and the proofs that bind each pass to the final check snapshot, checks for the `chattr +a` append-only inode flag, and says whether the worker folder is unchanged, changed (up to 10 paths) or missing since that snapshot.
 
 ## Testing and Hygiene Scan
 
@@ -61,7 +61,7 @@ make test
 /usr/bin/python3.12 tests/repo_scan.py
 ```
 
-`make test` runs all unit tests offline using local check mode, stub worker and planner processes (`tests/stub_worker.py`, `tests/stub_planner.py`), and an in-process fake Telegram server on `127.0.0.1` (60-second timeout per test). `python3.12 tests/repo_scan.py` scans tracked files for host names, non-loopback IPv4 addresses, Telegram tokens, numeric chat IDs, API keys, and personal home paths outside `/home/agent`.
+`make test` runs all unit tests offline using local check mode, stub worker and planner processes (`tests/stub_worker.py`, `tests/stub_planner.py`), and an in-process fake Telegram server on `127.0.0.1` (60-second timeout per test). `python3.12 tests/repo_scan.py` scans tracked files for host names, non-loopback IPv4 addresses (not inside the vendored folders credited in `NOTICE`), Telegram tokens, numeric chat IDs, API keys, and personal home paths outside `/home/agent`, and scans commit author names and emails for host names and banned strings.
 
 ## What It Does Not Guarantee
 

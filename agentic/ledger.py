@@ -57,6 +57,7 @@ class VerifyResult:
     count: int  # number of valid records before the first problem
     bad_seq: int | None = None  # 1-based position of the first bad record
     reason: str | None = None
+    bound: bool | None = None  # mission_started carries a contract hash; False: an old, unbound ledger; None: none
 
 
 class Ledger:
@@ -98,7 +99,11 @@ class Ledger:
                 return bad("hash does not match the record content")
             records.append(rec)
             prev = rec["hash"]
-        return records, VerifyResult(True, len(records))
+        bound, problem = binding(records)
+        if problem is not None:
+            index, reason = problem
+            return records[:index], VerifyResult(False, index, index + 1, reason, bound)
+        return records, VerifyResult(True, len(records), bound=bound)
 
     def verify(self) -> VerifyResult:
         """Recompute the whole chain and report the first bad record."""
@@ -146,6 +151,93 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def manifest_digest(manifest: dict[str, str]) -> str:
+    """sha256 of the canonical JSON of a tree manifest (relative path -> content sha256 or link text)."""
+    return hashlib.sha256(canonical(manifest).encode("utf-8")).hexdigest()
+
+
+def binding(records: list[dict]) -> tuple[bool | None, tuple[int, str] | None]:
+    """Whether the ledger binds its evidence (mission_started has contract_sha256), and the first record whose
+    binding does not hold as (0-based index, reason). An old ledger without these fields is unbound, never broken.
+
+    Every proof of a mission_finished record must name, by seq and hash, the latest check_result of its criterion,
+    which passed, ran in the last iteration on the final snapshot, with the check and the contract in force then."""
+    started = next((r for r in records if r["type"] == "mission_started"), None)
+    if started is None:
+        return None, None
+    if "contract_sha256" not in started["data"]:
+        return False, None
+    index = records.index(started)
+    try:
+        contract = started["data"]["contract_sha256"]
+        check_hash = dict(started["data"].get("check_sha256") or {})
+        criteria = [c["id"] for c in started["data"]["criteria"]]
+        latest: dict[str, int] = {}  # criterion -> seq of its latest check_result so far
+        last_iteration = 0
+        for index, rec in enumerate(records):
+            kind, data = rec["type"], rec["data"]
+            if kind == "iteration_worker":
+                last_iteration = max(last_iteration, data["iteration"])
+            elif kind == "check_result":
+                latest[data["criterion"]] = rec["seq"]
+            elif kind == "checks_update":
+                check_hash[data["criterion"]] = data["new_sha256"]
+                contract = data.get("new_contract_sha256", contract)
+            elif kind == "checks_strengthened" and data.get("ok") and data.get("contract_sha256"):
+                contract = data["contract_sha256"]
+            elif kind == "mission_finished":
+                reason = _proofs_problem(records, index, criteria, check_hash, contract, latest, last_iteration)
+                if reason is not None:
+                    return True, (index, reason)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return True, (index, "malformed evidence-binding fields")
+    return True, None
+
+
+def _proofs_problem(records: list[dict], index: int, criteria: list[str], check_hash: dict[str, str],
+                    contract: str, latest: dict[str, int], last_iteration: int) -> str | None:
+    data = records[index]["data"]
+    proofs, final = data.get("proofs"), data.get("final_snapshot_sha256")
+    if not isinstance(proofs, list) or "final_snapshot_sha256" not in data:
+        return "mission_finished has no proofs or final_snapshot_sha256"
+    if data.get("iterations") != last_iteration:
+        return f"mission_finished names iteration {data.get('iterations')!r}, the last one is {last_iteration}"
+    if "final_manifest" in data and (not isinstance(data["final_manifest"], dict)
+                                     or manifest_digest(data["final_manifest"]) != final):
+        return "final_manifest does not match final_snapshot_sha256"
+    proven: set[str] = set()
+    for proof in proofs:
+        if not isinstance(proof, dict) or set(proof) != {"criterion", "seq", "hash"}:
+            return "malformed proof"
+        cid, seq = proof["criterion"], proof["seq"]
+        if cid not in criteria or cid in proven:
+            return f"proof for an unknown or repeated criterion {cid!r}"
+        proven.add(cid)
+        if isinstance(seq, bool) or not isinstance(seq, int) or not 1 <= seq <= index:
+            return f"proof of {cid} points outside the ledger"
+        target = records[seq - 1]
+        if target["hash"] != proof["hash"] or target["type"] != "check_result":
+            return f"proof of {cid} does not name check_result {seq} by its hash"
+        result = target["data"]
+        if result["criterion"] != cid:
+            return f"proof of {cid} names a check_result of {result['criterion']}"
+        if result["passed"] is not True or result.get("exit_code") != 0:
+            return f"proof of {cid} names a check_result that did not pass"
+        if result["iteration"] != last_iteration:
+            return f"proof of {cid} is from iteration {result['iteration']}, not the last one ({last_iteration})"
+        if latest.get(cid) != seq:
+            return f"proof of {cid} is not the latest check_result of {cid}"
+        if final is None or result.get("snapshot_sha256") != final:
+            return f"proof of {cid} ran on another snapshot than final_snapshot_sha256"
+        if result.get("check_sha256") != check_hash.get(cid):
+            return f"proof of {cid} ran another check than the one in force"
+        if result.get("contract_sha256") != contract:
+            return f"proof of {cid} ran under another contract than the one in force"
+    if data.get("status") == "complete" and proven != set(criteria):
+        return "complete without a proof for every criterion"
+    return None
 
 
 def append_only(path: str | Path) -> bool | None:

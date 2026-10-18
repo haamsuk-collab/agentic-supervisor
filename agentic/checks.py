@@ -1,6 +1,7 @@
 """Run acceptance checks on a snapshot copy of the worker folder. The exit code is the only result."""
 
 import contextlib
+import hashlib
 import os
 import secrets
 import shutil
@@ -14,7 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from agentic.config import SNAPSHOT_SKIP, TAIL_BYTES, Config
+from agentic.ledger import manifest_digest
 from agentic.mission import Check
+
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+READ_CHUNK = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,11 @@ class ProcResult:
     timed_out: bool
     stdout: str  # last TAIL_BYTES
     stderr: str
+    # sha256 and size of the full output (not just the kept tail); a process that never started wrote nothing
+    stdout_sha256: str = EMPTY_SHA256
+    stdout_bytes: int = 0
+    stderr_sha256: str = EMPTY_SHA256
+    stderr_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -32,10 +43,19 @@ class CheckResult:
     timed_out: bool
     stdout: str
     stderr: str
+    stdout_sha256: str = EMPTY_SHA256
+    stdout_bytes: int = 0
+    stderr_sha256: str = EMPTY_SHA256
+    stderr_bytes: int = 0
+    snapshot_sha256: str | None = None  # tree_digest of the snapshot before the check files were written
+    manifest: dict[str, str] | None = None  # the tree_manifest behind snapshot_sha256 (kept in memory only)
 
     def to_data(self) -> dict:
         return {"passed": self.passed, "exit_code": self.exit_code, "timed_out": self.timed_out,
-                "stdout": self.stdout, "stderr": self.stderr}
+                "stdout": self.stdout, "stderr": self.stderr,
+                "stdout_sha256": self.stdout_sha256, "stdout_bytes": self.stdout_bytes,
+                "stderr_sha256": self.stderr_sha256, "stderr_bytes": self.stderr_bytes,
+                "snapshot_sha256": self.snapshot_sha256}
 
 
 def _tail(handle, limit: int = TAIL_BYTES) -> str:
@@ -43,6 +63,16 @@ def _tail(handle, limit: int = TAIL_BYTES) -> str:
     size = handle.tell()
     handle.seek(max(0, size - limit))
     return handle.read().decode("utf-8", errors="replace")
+
+
+def _digest(handle) -> tuple[str, int]:
+    """sha256 and byte count of everything written to `handle`."""
+    handle.seek(0)
+    digest, size = hashlib.sha256(), 0
+    while chunk := handle.read(READ_CHUNK):
+        digest.update(chunk)
+        size += len(chunk)
+    return digest.hexdigest(), size
 
 
 def _kill_group(pgid: int) -> None:
@@ -145,7 +175,10 @@ def run_process(argv: list[str], cwd: str | Path, timeout: float, stdout_bytes: 
             raise
         _kill_group(proc.pid)
         proc.wait()
-        return ProcResult(None if timed_out else proc.returncode, timed_out, _tail(out, stdout_bytes), _tail(err))
+        out_sha, out_bytes = _digest(out)
+        err_sha, err_bytes = _digest(err)
+        return ProcResult(None if timed_out else proc.returncode, timed_out, _tail(out, stdout_bytes), _tail(err),
+                          out_sha, out_bytes, err_sha, err_bytes)
 
 
 def build_command(check: Check, snapshot: str | Path, mode: str) -> list[str]:
@@ -181,6 +214,43 @@ def snapshot_tree(src: str | Path, dst: str | Path) -> None:
                 snapshot_tree(entry.path, target)
             elif entry.is_file(follow_symlinks=False):
                 shutil.copy2(entry.path, target)
+
+
+def tree_manifest(root: str | Path) -> dict[str, str]:
+    """What `snapshot_tree` copies, by relative posix path: sha256 of each regular file, `symlink:<link text>` of each
+    symlink (never followed). Entries named in SNAPSHOT_SKIP, fifos, sockets and devices are left out, exactly as the
+    copy leaves them out, so a folder and its snapshot have the same manifest. A missing folder is empty."""
+    found: dict[str, str] = {}
+    _manifest_walk(str(root), "", found)
+    return found
+
+
+def _manifest_walk(path: str, rel: str, found: dict[str, str]) -> None:
+    try:
+        entries = sorted(os.scandir(path), key=lambda e: e.name)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    for entry in entries:
+        if entry.name in SNAPSHOT_SKIP:
+            continue
+        name = rel + entry.name
+        if entry.is_symlink():
+            found[name] = "symlink:" + os.readlink(entry.path)
+        elif entry.is_dir(follow_symlinks=False):
+            _manifest_walk(entry.path, name + "/", found)
+        elif entry.is_file(follow_symlinks=False):
+            found[name] = _file_sha256(entry.path)
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        while chunk := os.read(fd, READ_CHUNK):
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
 
 
 def _write_check_file(root: str, rel: str, content: str) -> None:
@@ -234,6 +304,7 @@ def run_check(cfg: Config, mission_id: str, iteration: int, criterion_id: str,
     snapshot.mkdir(parents=True, mode=0o700)
     try:
         snapshot_tree(workdir, snapshot)
+        manifest = tree_manifest(snapshot)  # what the check sees of the worker's folder, before any check file
         remove_hijacking_files(snapshot)  # before the check files: those are the planner's, never removed
         home = snapshot / CHECK_HOME
         if home.is_dir() and not home.is_symlink():  # a worker-planted .home must not configure the check's tools
@@ -257,7 +328,8 @@ def run_check(cfg: Config, mission_id: str, iteration: int, criterion_id: str,
         except OSError:
             pass
     return CheckResult(proc.exit_code == 0 and not proc.timed_out, proc.exit_code, proc.timed_out,
-                       proc.stdout, proc.stderr)
+                       proc.stdout, proc.stderr, proc.stdout_sha256, proc.stdout_bytes, proc.stderr_sha256,
+                       proc.stderr_bytes, manifest_digest(manifest), manifest)
 
 
 LEAK_LENGTH = 16

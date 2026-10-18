@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agentic import admin, cards, config, daily, health, inbox, ledger, loop, notify, outbox, report
+from agentic import admin, cards, checks, config, daily, health, inbox, ledger, loop, notify, outbox, report
 from agentic.config import Config, valid_id
 from agentic.i18n import t
 from agentic.ledger import Ledger, LedgerError
@@ -81,9 +81,38 @@ def _cmd_verify(args: argparse.Namespace, cfg: Config) -> int:
         print(t("cli.verify.no_append_only"), file=sys.stderr)
     if result.ok:
         print(t("cli.verify.ok", count=result.count))
+        if result.bound is False:
+            print(t("cli.verify.unbound"))
+        line = _folder_line(cfg, args.mission, Ledger(path).read())
+        if line is not None:
+            print(line)
         return EXIT_OK
     print(t("cli.verify.broken", seq=result.bad_seq, reason=result.reason), file=sys.stderr)
     return EXIT_ERROR
+
+
+VERIFY_MAX_PATHS = 10
+
+
+def _folder_line(cfg: Config, mission_id: str, records: list[dict]) -> str | None:
+    """The worker folder against the final check snapshot of a finished, bound mission: unchanged, changed (up to
+    VERIFY_MAX_PATHS paths, sorted) or missing. None when there is no final snapshot to compare with."""
+    finished = next((r for r in reversed(records) if r["type"] == "mission_finished"), None)
+    final = finished["data"].get("final_snapshot_sha256") if finished else None
+    if not final:
+        return None
+    workdir = cfg.workdir(mission_id)
+    if not workdir.is_dir():
+        return t("cli.verify.folder_missing")
+    current = checks.tree_manifest(workdir)
+    if ledger.manifest_digest(current) == final:
+        return t("cli.verify.folder_unchanged")
+    recorded = finished["data"].get("final_manifest")
+    if recorded is None:  # the run that finished could not record the manifest: the paths are unknown
+        return t("cli.verify.folder_changed", count="?", paths="?")
+    changed = sorted(rel for rel in current.keys() | recorded.keys() if current.get(rel) != recorded.get(rel))
+    shown = ", ".join(changed[:VERIFY_MAX_PATHS]) + (", …" if len(changed) > VERIFY_MAX_PATHS else "")
+    return t("cli.verify.folder_changed", count=len(changed), paths=shown)
 
 
 def _cmd_migrate_workspaces(args: argparse.Namespace, cfg: Config) -> int:

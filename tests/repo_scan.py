@@ -22,6 +22,8 @@ DOCUMENTED_HOMES = frozenset({"agent"})
 
 # The spec files quote BANNED_STRINGS to define the rule, so only that rule skips them.
 SPEC_FILE_RE = re.compile(r"(^|/)SPEC(-[A-Z])?\.md$")
+# Third-party folder prefixes credited in NOTICE: only the IP-address rule is skipped inside them.
+VENDORED = ("guidance/user/skills/insane-search/",)
 CHAT_ID_RE = re.compile(r"""\b(owner_id|chat_id)["']?\s*[:=]\s*-?\d{5,}""")
 TELEGRAM_TOKEN_RE = re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}")
 API_KEY_RES = (
@@ -35,9 +37,11 @@ API_KEY_RES = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 )
 IPV4_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w.])")
-# Addresses that identify no host: loopback, "any", and the documentation ranges (RFC 5737).
+# Addresses that identify no host: loopback, "any", the documentation ranges (RFC 5737), and link-local
+# (169.254.0.0/16, the cloud metadata address that SSRF guards name).
 ALLOWED_NETS = tuple(ipaddress.ip_network(n) for n in
-                     ("127.0.0.0/8", "0.0.0.0/32", "169.254.0.0/16", "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))  # 169.254/16: link-local metadata address used by SSRF guards
+                     ("127.0.0.0/8", "0.0.0.0/32", "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24",
+                      "169.254.0.0/16"))
 HOME_RE = re.compile(r"(?<![\w.])/(home|Users)/([A-Za-z0-9_][A-Za-z0-9_.-]*)")
 TEXT_SNIFF_BYTES = 8192
 
@@ -64,6 +68,7 @@ def scan_text(rel: str, text: str, hosts: tuple[str, ...] = ()) -> list[str]:
     """Findings for one file's text, each `rel:line: rule: excerpt`."""
     findings = []
     spec_file = SPEC_FILE_RE.search(rel) is not None
+    vendored = any(rel.startswith(prefix.rstrip("/") + "/") for prefix in VENDORED)
     for number, line in enumerate(text.splitlines(), 1):
         def hit(rule: str, excerpt: str) -> None:
             findings.append(f"{rel}:{number}: {rule}: {excerpt}")
@@ -76,13 +81,14 @@ def scan_text(rel: str, text: str, hosts: tuple[str, ...] = ()) -> list[str]:
         for host in hosts:
             if host in lowered:
                 hit("host name", host)
-        for match in IPV4_RE.finditer(line):
-            try:
-                address = ipaddress.ip_address(match.group(1))
-            except ValueError:
-                continue  # not an address (an octet over 255)
-            if not any(address in net for net in ALLOWED_NETS):
-                hit("IP address", match.group(1))
+        if not vendored:
+            for match in IPV4_RE.finditer(line):
+                try:
+                    address = ipaddress.ip_address(match.group(1))
+                except ValueError:
+                    continue  # not an address (an octet over 255)
+                if not any(address in net for net in ALLOWED_NETS):
+                    hit("IP address", match.group(1))
         for match in TELEGRAM_TOKEN_RE.finditer(line):
             hit("Telegram token", match.group(0)[:12] + "…")
         for match in CHAT_ID_RE.finditer(line):
@@ -96,14 +102,51 @@ def scan_text(rel: str, text: str, hosts: tuple[str, ...] = ()) -> list[str]:
     return findings
 
 
+def scan_git_log(root: Path, hosts: tuple[str, ...] = ()) -> list[str]:
+    """Findings for git commit authors (and distinct committers), each `commit <hash> <field>: <rule>: <excerpt>`."""
+    if not (root / ".git").exists():
+        return []
+    out = subprocess.run(
+        ["git", "-C", str(root), "log", "--all", "--format=%h%x00%an%x00%ae%x00%cn%x00%ce"],
+        capture_output=True, check=True,
+    ).stdout.decode("utf-8", "replace")
+    findings = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        commit, an, ae, cn, ce = line.split("\0")
+        fields = [("author", f"{an}\0{ae}")]
+        if (cn, ce) != (an, ae):
+            fields.append(("committer", f"{cn}\0{ce}"))
+        for role, value in fields:
+            lowered = value.lower()
+            for banned in BANNED_STRINGS:
+                if banned in lowered:
+                    findings.append(f"commit {commit} {role}: banned string: {banned}")
+            for host in hosts:
+                if host in lowered:
+                    findings.append(f"commit {commit} {role}: host name: {host}")
+    return findings
+
+
 def scan(root: Path, hosts: tuple[str, ...] | None = None) -> list[str]:
     hosts = host_names() if hosts is None else hosts
     findings = []
-    for path in files_to_scan(root):
+    notice = root / "NOTICE"
+    if notice.is_file():
+        notice_text = notice.read_text(encoding="utf-8", errors="replace")
+        for prefix in VENDORED:
+            if prefix not in notice_text:
+                findings.append(f"NOTICE:1: uncredited vendored path: {prefix}")
+    files = files_to_scan(root)
+    if (root / ".git").exists() and not files:
+        findings.append(".git:0: empty repository: no tracked files to scan")
+    for path in files:
         data = path.read_bytes()
         if b"\0" in data[:TEXT_SNIFF_BYTES]:
             continue  # binary
         findings.extend(scan_text(path.relative_to(root).as_posix(), data.decode("utf-8", "replace"), hosts))
+    findings.extend(scan_git_log(root, hosts))
     return findings
 
 

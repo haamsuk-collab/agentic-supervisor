@@ -50,7 +50,7 @@ sudo agentic mission status <id>
 sudo agentic report <id>
 ```
 
-`agentic mission status <id>`는 유닛 상태와 최근 원장 이벤트 5건, 렌더링된 보고서(`<state>/missions/<id>/report.md`)를 출력합니다. `agentic report <id>`는 해시 체인 원장에서 직접 `report.md`를 다시 생성하며 `agentic verify <id>`는 원장의 SHA-256 해시 체인과 `chattr +a` 추가 전용 inode 플래그를 검증합니다.
+`agentic mission status <id>`는 유닛 상태와 최근 원장 이벤트 5건, 렌더링된 보고서(`<state>/missions/<id>/report.md`)를 출력합니다. `agentic report <id>`는 해시 체인 원장에서 직접 `report.md`를 다시 생성합니다. `agentic verify <id>`는 원장의 SHA-256 해시 체인, 각 통과를 마지막 검사 스냅샷에 묶는 증거(proof), `chattr +a` 추가 전용 inode 플래그를 검증하고 작업 폴더가 그 스냅샷 이후 그대로인지, 바뀌었는지(경로 최대 10개), 없어졌는지 알려 줍니다.
 
 ## 테스트 및 저장소 위생 검사 (Testing and Hygiene Scan)
 
@@ -61,7 +61,7 @@ make test
 /usr/bin/python3.12 tests/repo_scan.py
 ```
 
-`make test`는 로컬 검사 모드와 스텁(stub) 작업자·계획자 프로세스(`tests/stub_worker.py`, `tests/stub_planner.py`), `127.0.0.1`에서 동작하는 프로세스 내 가짜 Telegram 서버를 사용해 모든 단위 테스트를 오프라인으로 실행합니다(테스트당 타임아웃 60초). `python3.12 tests/repo_scan.py`는 추적 중인 파일에서 호스트 이름, 루프백(loopback)이 아닌 IPv4 주소, Telegram 토큰, 숫자형 채팅 ID, API 키, `/home/agent` 외의 개인 홈 경로를 스캔합니다.
+`make test`는 로컬 검사 모드와 스텁(stub) 작업자·계획자 프로세스(`tests/stub_worker.py`, `tests/stub_planner.py`), `127.0.0.1`에서 동작하는 프로세스 내 가짜 Telegram 서버를 사용해 모든 단위 테스트를 오프라인으로 실행합니다(테스트당 타임아웃 60초). `python3.12 tests/repo_scan.py`는 추적 중인 파일에서 호스트 이름, 루프백(loopback)이 아닌 IPv4 주소(`NOTICE`에 적은 서드파티 폴더 안은 제외), Telegram 토큰, 숫자형 채팅 ID, API 키, `/home/agent` 외의 개인 홈 경로를 스캔하고 커밋 작성자 이름과 이메일에서 호스트 이름과 금지 문자열을 찾습니다.
 
 ## 보장하지 않는 것 (What It Does Not Guarantee)
 

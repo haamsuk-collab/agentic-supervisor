@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+# Stage specs are published under docs/specs/; the root copies are the operator's.
+/SPEC*.md

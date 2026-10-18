@@ -14,14 +14,16 @@ from test_review import FINDING, cheating_fix
 TRANSITIONS = ("plan_step", "iteration_worker", "check_result", "canary", "mutation", "review", "review_veto",
                "mission_finished")
 VOLATILE = {"ts", "hash", "prev", "duration_seconds", "elapsed_seconds"}
-# A check's traceback names its snapshot: the test's temporary folder and 128 random bits change every run.
+# A check's traceback names its snapshot: the test's temporary folder and 128 random bits change every run. The
+# sha256 of the full output covers those names too, so it changes with them.
 RANDOM_PATHS = re.compile(r"/tmp/agentic-test-[^/]+|-[0-9a-f]{32}")
+OUTPUT_HASHES = {"stdout_sha256", "stderr_sha256"}
 
 
 def stable(value):
     """A ledger record or its data without timestamps, hashes, measured durations and random snapshot names."""
     if isinstance(value, dict):
-        return {k: stable(v) for k, v in value.items() if k not in VOLATILE}
+        return {k: stable(v) for k, v in value.items() if k not in VOLATILE | OUTPUT_HASHES}
     if isinstance(value, list):
         return [stable(v) for v in value]
     if isinstance(value, str):

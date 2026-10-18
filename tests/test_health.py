@@ -71,13 +71,16 @@ class HealthTests(SupervisorTestCase):
             "iteration": 1, "step": 0, "model": "anthropic/claude-sonnet-5-5",
             "thinking": "high", "active": ["c1", "c2"], "note": "done",
         })
-        led.append("check_result", {"iteration": 1, "criterion": "c1", "passed": c1_pass,
-                                    "exit_code": 0 if c1_pass else 1})
-        led.append("check_result", {"iteration": 1, "criterion": "c2", "passed": c2_pass,
-                                    "exit_code": 0 if c2_pass else 1})
+        r1 = led.append("check_result", {"iteration": 1, "criterion": "c1", "passed": c1_pass,
+                                         "exit_code": 0 if c1_pass else 1})
+        r2 = led.append("check_result", {"iteration": 1, "criterion": "c2", "passed": c2_pass,
+                                         "exit_code": 0 if c2_pass else 1})
         if c2_gave_up:
             led.append("gave_up", {"iteration": 1, "criteria": ["c2"], "attempts": 1})
-        led.append("mission_finished", {"status": status, "iterations": 1})
+        proofs = [{"criterion": r["data"]["criterion"], "seq": r["seq"], "hash": r["hash"]}
+                  for r in (r1, r2) if r["data"]["passed"]]
+        led.append("mission_finished", {"status": status, "iterations": 1, "proofs": proofs,
+                                        "final_snapshot_sha256": None})
 
     def test_all_ok_has_no_todo_and_no_repairs(self):
         self._write_canary_ledger("canary-20261018", "topsecretvalue1234567890abcdef")

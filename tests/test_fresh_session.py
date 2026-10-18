@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import unittest
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from unittest import mock
 
 from agentic import cards, checks, commands, config, daily, health, loop, mission, worker
 from agentic.ledger import Ledger
-from helpers import FakeCommands, SupervisorTestCase, TimedTestCase, make_mission
+from helpers import FakeCommands, SupervisorTestCase, TimedTestCase, make_mission, wait_until
 
 NOW = datetime(2026, 10, 18, 0, 0, tzinfo=timezone.utc)
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
@@ -276,6 +277,60 @@ class LeftoverClassificationTests(SupervisorTestCase):
             )
         self.assertEqual(h_old.worker_leftovers, [])
 
+    def test_concurrent_missions_do_not_list_each_others_agent_folders(self):
+        sync = self.stub_dir / "sync"
+        sync.mkdir()
+        wait = ("import time\n"
+                "def wait_for(p):\n"
+                "    end = time.monotonic() + 20\n"
+                "    while not p.exists() and time.monotonic() < end:\n"
+                "        time.sleep(0.02)\n")
+        script_a = (
+            "import os, pathlib\n" + wait +
+            f"sync = pathlib.Path({str(sync)!r})\n"
+            "rogue = pathlib.Path(os.environ['HOME']) / '.omp-agent-rogue'\n"
+            "rogue.mkdir()\n"
+            "(rogue / 'x.txt').write_text('worker-made', encoding='utf-8')\n"
+            "(sync / 'a_started').touch()\n"
+            "wait_for(sync / 'b_started')\n"
+        )
+        script_b = (
+            "import pathlib\n" + wait +
+            f"sync = pathlib.Path({str(sync)!r})\n"
+            "(sync / 'b_started').touch()\n"
+            "wait_for(sync / 'a_done')\n"
+        )
+        cfg_a = config.load({**os.environ, "AGENTIC_WORKER_CMD": json.dumps([sys.executable, "-c", script_a])})
+        cfg_b = config.load({**os.environ, "AGENTIC_WORKER_CMD": json.dumps([sys.executable, "-c", script_b])})
+        work_a, work_b = cfg_a.workdir("ma"), cfg_b.workdir("mb")
+        work_a.mkdir(parents=True)
+        work_b.mkdir(parents=True)
+        results = {}
+
+        def run_a():
+            results["a"] = worker.run_worker(cfg_a, "m", "high", 1, "P", work_a)
+            (sync / "a_done").touch()
+
+        def run_b():
+            results["b"] = worker.run_worker(cfg_b, "m", "high", 1, "P", work_b)
+
+        thread_a = threading.Thread(target=run_a)
+        thread_a.start()
+        wait_until(lambda: (sync / "a_started").exists(), what="worker A started")
+        thread_b = threading.Thread(target=run_b)  # B's agent folder appears after A's first home snapshot
+        thread_b.start()
+        thread_a.join(30)
+        thread_b.join(30)
+        self.assertEqual(results["a"].exit_code, 0, results["a"].stderr)
+        self.assertEqual(results["b"].exit_code, 0, results["b"].stderr)
+        # A ended while B's supervisor-created agent folder was live: not a leftover. A folder the worker named like
+        # an agent folder is not registered, so it still is.
+        self.assertEqual(results["a"].leftovers, (".omp-agent-rogue/x.txt",))
+        self.assertEqual(results["b"].leftovers, ())
+        self.assertEqual([p.name for p in self.worker_home.iterdir() if p.name.startswith(".omp-agent-")],
+                         [".omp-agent-rogue"])
+        self.assertEqual(worker.live_agent_dirs(self.cfg), set())
+
 
 class NoResumeOrSessionEnvInheritanceTests(TimedTestCase):
     def test_worker_command_never_contains_resume_or_continue_flags(self):
@@ -315,6 +370,7 @@ class NoResumeOrSessionEnvInheritanceTests(TimedTestCase):
             "OMP_RESUME": "true",
             "SECRET_SUPERVISOR_VAR": "should-not-leak",
             "AGENTIC_WORKER_HOME": str(worker_home),
+            "AGENTIC_STATE": str(tmp / "state"),  # the agent-folder registry lives in the state folder
             "AGENTIC_WORKER_CMD": json.dumps([sys.executable, "-c", script]),
         }
         with mock.patch.dict(os.environ, poison, clear=False):

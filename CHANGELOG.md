@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Evidence bound to what was checked
+- `mission_started` records the mission's `contract_sha256`; a resumed run refuses an edited mission file, and
+  `checks_update` records the old and new contract.
+- Every `check_result` records its snapshot digest, check and contract hashes, and the sha256 and size of the
+  full stdout and stderr. Checks of one iteration that saw different snapshots run once more, then the mission
+  stops as `stopped_unstable`.
+- `mission_finished` lists the proofs behind every pass and the final snapshot; `verify` re-checks them, reports
+  count passes only through proofs, and `agentic verify <id>` compares the worker folder with the final snapshot.
+  Old ledgers verify as unbound.
+- Concurrent missions no longer report each other's throw-away agent folders as worker leftovers.
+- The release scan skips only the IP rule inside vendored folders credited in NOTICE, reports a git checkout
+  with no files to scan, and checks commit author names and emails.
+- Spool items are named `<20-digit time_ns sequence>-<random>` and read in that order, so items written in the
+  same nanosecond or with the same mtime keep their order.
+- The release scan allows link-local addresses (169.254.0.0/16).
+- `guidance/user` and `guidance/project` are published as generic examples, without the vendored skill's tests;
+  the stage specs are published under `docs/specs/`.
+
 ### Stage H: closing the cheat paths found in the t1 audits
 - Checks run with `/usr/bin/python3.12 -I`, a fixed `PATH` and an empty `HOME`; files that could hijack a check
   (stdlib-named modules, `conftest.py`, `sitecustomize.py`, `*.pth`) are removed from the snapshot and reported.

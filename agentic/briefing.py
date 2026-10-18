@@ -3,7 +3,9 @@
 Deterministic and never AI-written: todo items, decisions, next instructions and remaining criteria come only from the
 ledger, the mission's public view and the rule table below. AI-written text (planner assumptions, the worker's
 DECISIONS.md lines) is kept apart in `ai_notes` and never enters a todo, a decision or an instruction.
-"Achieved" counts only criteria whose latest supervisor-run check exited 0.
+"Achieved" counts only criteria whose latest supervisor-run check exited 0; once the mission has finished, only the
+criteria with a proof in the mission_finished record (a passing check_result of the last iteration, bound to its
+snapshot) count. A missing proof is never a pass.
 """
 
 from collections import Counter
@@ -17,7 +19,7 @@ from agentic.i18n import CATALOGS, t
 from agentic.ledger import parse_ts
 from agentic.worker import one_line
 
-STATES = ("running", "complete", "partial", "stopped_time", "plan_failed", "planning")
+STATES = ("running", "complete", "partial", "stopped_time", "stopped_unstable", "plan_failed", "planning")
 ACHIEVED, FAILED, UNVERIFIABLE = "✅", "❌", "⚠️"
 REASON_MAX_CHARS = 300
 PLAN_STEPS = ("brief", "design", "checks", "critique")
@@ -183,6 +185,7 @@ class _Facts:
     strengthened: dict | None = None  # data of the checks_strengthened record
     hygiene: list[str] = field(default_factory=list)  # worker files dropped from check snapshots (SPEC-H section 1)
     evidence_ts: str | None = None  # ts of the latest supervisor-run check evidence (check_result or canary)
+    proofs: set[str] | None = None  # criteria with a proof in mission_finished; None: no record or an unbound one
 
 
 def _reduce(records: list[dict], view: dict) -> _Facts:
@@ -253,6 +256,7 @@ def _reduce(records: list[dict], view: dict) -> _Facts:
         elif kind == "mission_finished":
             f.final = data["status"]
             f.finished_ts = rec["ts"]
+            f.proofs = {p["criterion"] for p in data["proofs"]} if "proofs" in data else None
         if kind in ("worker_unavailable", "plan_unavailable") and data["wait_seconds"]:
             # The planned wait, cut at the next record (a deadline can end a wait early); an open wait counts 0.
             if index + 1 < len(records):
@@ -264,7 +268,7 @@ def _reduce(records: list[dict], view: dict) -> _Facts:
 
 
 def _state(f: _Facts) -> str:
-    if f.final in ("complete", "partial", "stopped_time", "plan_failed"):
+    if f.final in ("complete", "partial", "stopped_time", "stopped_unstable", "plan_failed"):
         return f.final
     return "planning" if f.planned and not f.mission_started else "running"
 
@@ -292,7 +296,14 @@ def _items(f: _Facts) -> tuple[list[Item], dict[str, list[Item]]]:
             item, group = Item(FAILED, cid, text, t("briefing.reason.canary"), **common), "canary"
         elif cid in f.gave_up:
             item, group = Item(FAILED, cid, text, t("briefing.reason.gave_up", n=f.gave_up[cid]), **common), "gave_up"
-        elif _passed(last) and cid not in f.unproven_inherited:
+        elif f.final is not None and cid in (f.proofs or ()):  # finished: a pass is a proof, nothing else
+            notes = [t("briefing.reason.suspect", file=one_line(x["file"]), quote=one_line(x["quote"]))
+                     for x in suspect.get(cid, [])]
+            item, group = Item(ACHIEVED, cid, text, " · ".join(notes), **common), None
+        elif f.final is not None and _passed(last):  # a pass without its proof never counts
+            reason = t("briefing.reason.unbound") if f.proofs is None else t("briefing.reason.unproven")
+            item, group = Item(UNVERIFIABLE, cid, text, reason, **common), None
+        elif f.final is None and _passed(last) and cid not in f.unproven_inherited:
             notes = [t("briefing.reason.suspect", file=one_line(x["file"]), quote=one_line(x["quote"]))
                      for x in suspect.get(cid, [])]
             item, group = Item(ACHIEVED, cid, text, " · ".join(notes), **common), None
@@ -443,6 +454,10 @@ def _hygiene(c: _Ctx) -> None:
     c.notices.append(t("briefing.notice.hygiene", files=", ".join(c.hygiene)))
 
 
+def _unstable(c: _Ctx) -> None:
+    c.notices.append(t("briefing.notice.unstable"))
+
+
 RULES = (  # (condition, effect) in table order; every matching row adds to the lists in this order
     (lambda c: c.state in ("running", "planning"), _running),
     (lambda c: c.state == "complete", _complete),
@@ -452,6 +467,7 @@ RULES = (  # (condition, effect) in table order; every matching row adds to the 
     (lambda c: bool(c.groups["dropped"] or c.groups["invalid"]), _unverifiable),
     (lambda c: bool(c.suspect), _suspect),
     (lambda c: c.state == "plan_failed", _plan_failed),
+    (lambda c: c.state == "stopped_unstable", _unstable),
     (lambda c: c.review_failed, _review_failed),
     (lambda c: c.waited > 0, _outage),
     (lambda c: c.parent is not None, _parent),

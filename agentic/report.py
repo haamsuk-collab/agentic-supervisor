@@ -26,6 +26,7 @@ STATUS_KEYS = {
     "complete": "report.status.complete",
     "partial": "report.status.partial",
     "stopped_time": "report.status.stopped_time",
+    "stopped_unstable": "report.status.stopped_unstable",
     "plan_failed": "report.status.plan_failed",
 }
 RESULT_KEYS = {

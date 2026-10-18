@@ -401,15 +401,22 @@ class BaselineTests(PlannedFollowUpCase):
         passed = {r["data"]["criterion"]: r["data"]["passed"] for r in self.records(new_id)
                   if r["type"] == "check_result"}
         self.assertEqual(passed, {"c1": True, "c2": True})
-        self.assertEqual(self.records(new_id)[-1]["data"], {"status": "complete", "iterations": 1})
+        finished = self.records(new_id)[-1]["data"]
+        self.assertEqual((finished["status"], finished["iterations"]), ("complete", 1))
+        self.assertEqual([p["criterion"] for p in finished["proofs"]], ["c1", "c2"])
 
     def test_all_passing_at_baseline_runs_the_review_at_iteration_0_and_completes(self):
         self.parent_done(worker_plan=[fix("c1", "c2")])
         new_id = self.follow_up()
         self.assertEqual(loop.run(new_id, self.cfg), "complete")
         types = self.kinds(new_id)
-        # SPEC-F section 2: inherited passes count only after the canary held for them.
-        self.assertEqual(types[types.index("baseline"):], ["baseline", "canary", "review", "mission_finished"])
+        # SPEC-F section 2: inherited passes count only after the canary held for them. A pass also needs a proof
+        # from the final checks, so the inherited passes are checked once more (iteration 0) before finishing.
+        self.assertEqual(types[types.index("baseline"):],
+                         ["baseline", "canary", "review", "check_result", "check_result", "mission_finished"])
+        confirms = [r for r in self.records(new_id) if r["type"] == "check_result"]
+        self.assertEqual([(r["data"]["iteration"], r["data"]["criterion"], r["data"]["passed"], r["data"]["confirm"])
+                          for r in confirms], [(0, "c1", True, True), (0, "c2", True, True)])
         canary_data = next(r["data"] for r in self.records(new_id) if r["type"] == "canary")
         self.assertEqual(canary_data["iteration"], 0)
         self.assertTrue(all(result["held"] for result in canary_data["results"].values()))
@@ -420,7 +427,10 @@ class BaselineTests(PlannedFollowUpCase):
         review = next(r["data"] for r in self.records(new_id) if r["type"] == "review")
         self.assertEqual(review["iteration"], 0)
         self.assertEqual(self.calls(), [], "no worker call")
-        self.assertEqual(self.records(new_id)[-1]["data"], {"status": "complete", "iterations": 0})
+        finished = self.records(new_id)[-1]["data"]
+        self.assertEqual((finished["status"], finished["iterations"]), ("complete", 0))
+        self.assertEqual(finished["proofs"], [{"criterion": r["data"]["criterion"], "seq": r["seq"], "hash": r["hash"]}
+                                              for r in confirms])
 
     def test_a_veto_at_iteration_0_sends_the_worker_back_as_usual(self):
         self.parent_done(worker_plan=[cheating_fix("c1", "c2")])

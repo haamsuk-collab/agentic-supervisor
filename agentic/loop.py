@@ -252,6 +252,9 @@ class LoopState:
         if self.strengthen_ok:  # run the new checks on the current work, then the canary and the score again
             self.active, self.results, self.rechecking = self.remaining(), {}, True
             self.canary_iteration = None
+            # Results of the replaced checks ran under the old contract: none can prove anything any more. The
+            # snapshot stays, since the new checks must see the same work.
+            self.iter_checks = {}
 
     def _on_checks_update(self, record: dict) -> None:
         self.updates_recorded.add(record["data"]["criterion"])

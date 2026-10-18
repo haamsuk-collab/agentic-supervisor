@@ -636,3 +636,6 @@ Each line is one choice SPEC-G left open.
 - `tests/repo_scan.py` allows `169.254.0.0/16` (link-local, the cloud metadata address SSRF guards name) anywhere, not only in vendored folders.
 - `guidance/user` and `guidance/project` are copies of `/etc/agentic/guidance/{user,project}` without `guidance/user/skills/insane-search/engine/tests/`; `guidance/user/AGENTS.md` is a generic "example: edit for your server" guide under the 3000-byte budget. `guidance/reference` is not published.
 - `docs/specs/SPEC.md` to `SPEC-G.md` are tracked; the root `SPEC*.md` are untracked (`git rm --cached`, the root-owned files stay on disk unchanged) and ignored by `/SPEC*.md` in `.gitignore`. Copying `SPEC-H.md` into `docs/specs/` was refused by the workstation guardrail (creating a spec file) and is left to the root operator.
+
+## Review fix: proofs after a strengthening
+- An ok `checks_strengthened` empties the loop state's `iter_checks` (the snapshot stays): results of the replaced checks ran under the old contract and can no longer be proofs, so a `stopped_unstable` finish right after a strengthening records `proofs: []` instead of a proof `ledger.binding` rejects. Chosen over filtering in `finish()` because it is a pure ledger replay and leaves old unbound ledgers alone.

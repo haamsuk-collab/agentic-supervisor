@@ -1,9 +1,12 @@
 """SPEC-F section 3: the mutation score, and the one automatic strengthening of weak checks."""
 
+import itertools
 import json
 import sys
+from unittest import mock
 
-from agentic import briefing, config, mutation
+from agentic import briefing, checks, config, mutation
+from agentic.ledger import Ledger
 from agentic.mission import parse_mission
 from helpers import PlannedTestCase, StepClock, SupervisorTestCase, fix, make_mission
 
@@ -165,3 +168,18 @@ class StrengtheningTests(PlannedTestCase):
         b = briefing.build(self.records(), None, [], None)
         self.assertIn("검사 강화: 변형 4개 중 1개 → 새 검사를 만들지 못함", b.notices)
         self.assertEqual(b.decisions, [])
+
+    def test_unstable_checks_right_after_a_strengthening_stop_with_a_ledger_that_verifies(self):
+        real, ledger, counter = checks.manifest_digest, self.cfg.ledger_file("demo"), itertools.count()
+
+        def drifting(manifest):
+            if '"checks_strengthened"' in ledger.read_text(encoding="utf-8"):
+                return f"drift-{next(counter)}"
+            return real(manifest)
+
+        with mock.patch("agentic.checks.manifest_digest", drifting):
+            self.assertEqual(self.run_weak(write_calc(GOOD)), "stopped_unstable")
+        records = self.records()
+        self.assertEqual(records[-1]["type"], "mission_finished")
+        self.assertEqual((records[-1]["data"]["status"], records[-1]["data"]["proofs"]), ("stopped_unstable", []))
+        self.assertTrue(Ledger(ledger).verify().ok)
